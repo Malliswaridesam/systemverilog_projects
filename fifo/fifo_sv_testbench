@@ -1,0 +1,259 @@
+class transaction;
+rand bit oper;
+bit wr;
+bit rd;
+bit [7:0]din;
+bit [7:0]dout;
+bit empty,full;
+
+constraint oper_dist{
+oper dist {0:/50,1:/50};}
+endclass
+
+class generator;
+
+transaction tr;
+event nextgs;
+event done;
+
+mailbox #(transaction)mbx;
+
+int count=0;
+int i=0;
+
+function new(mailbox #(transaction)mbx);
+this.mbx = mbx;
+tr=new();
+endfunction
+
+task run();
+repeat(count)
+begin
+assert(tr.randomize)else 
+$display("Randomization failed");
+i++;
+mbx.put(tr);
+
+$display("Operation:%0d,iteration:%0d",tr.oper,i);
+@(nextgs);
+end
+
+
+->done;
+endtask
+
+endclass
+
+
+class driver;
+virtual fifo_if fif;
+transaction data;
+mailbox #(transaction)mbx;
+ 
+function new(mailbox #(transaction) mbx );
+this.mbx=mbx;
+endfunction
+
+task reset();
+fif.rst<=1'b1;  
+fif.wr<=1'b0;
+fif.rd<=1'b0;
+fif.din<=0;
+repeat(5)@(posedge fif.clk);
+fif.rst<=1'b0;
+$display("Reset done");
+$display("------------------------");
+endtask
+
+task write();
+@(posedge fif.clk);
+fif.rst<=1'b0;
+fif.wr<=1'b1;
+fif.rd<=1'b0;
+fif.din<=$urandom_range(1,10);
+@(posedge fif.clk);
+fif.wr<=1'b0;
+$display("[Drv]: Data Write:%0d",fif.din);
+@(posedge fif.clk);
+endtask
+
+task read();
+@(posedge fif.clk);
+fif.rst<=1'b0;
+fif.wr<=1'b0;
+fif.rd<=1'b1;
+@(posedge fif.clk);
+fif.rd<=1'b0;
+$display("[Drv]: Data read");
+@(posedge fif.clk);
+endtask
+
+
+task run();
+forever begin
+mbx.get(data);
+if(data.oper == 1'b1)
+write();
+else
+read();
+end
+endtask
+endclass
+
+class monitor;
+mailbox # (transaction) mbxsd;
+transaction tr;
+virtual fifo_if fif;
+ 
+ function new(mailbox #(transaction)mbxsd);
+ this.mbxsd=mbxsd;
+ endfunction;
+    
+ task run();
+ tr=new();
+ forever begin
+ repeat(2)@(posedge fif.clk);
+ tr.wr=fif.wr;
+ tr.rd=fif.rd;
+ tr.din=fif.din;
+ tr.full=fif.full;
+ tr.empty=fif.empty;
+ @(posedge fif.clk);
+ tr.dout=fif.dout;
+ mbxsd.put(tr);
+ $display("[MON] : Wr:%0d rd:%0d din:%0d dout:%0d full:%0d empty:%0d", tr.wr, tr.rd, tr.din, tr.dout, tr.full, tr.empty);
+ end
+ endtask
+endclass
+
+
+class scoreboard;
+
+mailbox #(transaction) mbxsd;
+transaction tr;
+event nextgs;
+bit [7:0]din[$];
+bit [7:0]temp;
+
+function new(mailbox #(transaction) mbxsd);
+this.mbxsd=mbxsd;
+endfunction
+
+
+
+ task run();
+ forever begin
+ mbxsd.get(tr);
+ if(tr.wr==1'b1)
+ begin
+ if(tr.full==1'b0)
+ begin
+ din.push_front(tr.din);
+ $display("Data stored in Queue :%0d",tr.din);
+ end
+ else
+ begin
+ $display("QUeue is full");
+  $display("---------");
+  end
+ end
+
+ 
+ if(tr.rd==1'b1)
+ begin
+ if(tr.empty==1'b0)
+ begin
+ temp=din.pop_back();
+ 
+ if(tr.dout==temp)
+ $display("Data Match");
+ else
+ $display("Data Mismatch");
+ end
+ else
+ $display("Queue is empty");
+ end
+ $display("----------------");
+  
+  ->nextgs;
+ end
+ 
+ endtask
+ endclass
+ 
+ class environment;
+ virtual fifo_if fif;
+ generator gen;
+ driver drv;
+ monitor mon;
+ scoreboard scr;
+ mailbox #(transaction)mbxgd;
+ mailbox #(transaction)mbxms;
+ event nextgs;
+ event done;
+ function new(virtual fifo_if fif);
+ mbxgd=new();
+ mbxms=new();
+ gen=new(mbxgd);
+ drv=new(mbxgd);
+ mon=new(mbxms);
+ scr=new(mbxms);
+ 
+ 
+ 
+ this.fif=fif;
+ drv.fif=this.fif;
+ mon.fif=this.fif;
+ gen.nextgs=nextgs;
+ scr.nextgs=nextgs;
+ 
+ endfunction
+ 
+ task pre_test();
+ drv.reset();
+ endtask
+ 
+ task test();
+ fork
+ gen.run();
+ drv.run();
+ mon.run();
+ scr.run();
+ join_any
+ endtask
+ 
+ task post_test();
+ wait(gen.done.triggered);
+ $finish();
+ endtask
+ 
+ task run();
+
+ pre_test();
+ test();
+ post_test();
+ 
+ endtask
+ 
+ endclass
+ 
+module fifo_tb;
+
+
+fifo_if fif();
+fifo uut(fif.clk,fif.rst,fif.wr,fif.rd,fif.din,fif.dout,fif.empty,fif.full);
+initial begin
+fif.clk<=1'b0;
+end
+always #10 fif.clk=~fif.clk;
+
+initial begin
+
+environment env;
+env=new(fif);
+env.gen.count=15;
+env.run();
+end
+
+
+endmodule
